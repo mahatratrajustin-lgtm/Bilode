@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta name="description" content="Artisio : devis, factures et suivi des encaissements pour artisans du bâtiment. 14 jours d'essai gratuit, sans carte bancaire.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Artisio">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f766e'/%3E%3Cpath d='M20 46V24l12-8 12 8v22M27 46V34h10v12' fill='none' stroke='white' stroke-width='4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%230f766e'/%3E%3Cpath d='M20 46V24l12-8 12 8v22M27 46V34h10v12' fill='none' stroke='white' stroke-width='4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+<title>Artisio – Devis & factures pour artisans</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+  .inp { width:100%; border:1px solid #cbd5e1; border-radius:.75rem; padding:.7rem .85rem; background:#fff; font-size:16px; }
+  .inp:focus { outline:2px solid #0f766e; border-color:transparent; }
+  .lbl { display:block; font-size:.75rem; font-weight:600; color:#475569; margin-bottom:.25rem; }
+  .btn { border-radius:.85rem; padding:.8rem 1rem; font-weight:600; text-align:center; }
+  .btn-p { background:#0f766e; color:#fff; }
+  .btn-s { background:#e2e8f0; color:#0f172a; }
+  .btn-d { background:#fee2e2; color:#b91c1c; }
+  #print-area { display:none; }
+  @media print {
+    body > *:not(#print-area) { display:none !important; }
+    #print-area { display:block !important; padding:0; }
+    .sheet { box-shadow:none !important; border:none !important; }
+  }
+</style>
+</head>
+<body class="bg-slate-200">
+
+<div id="app" class="max-w-md mx-auto min-h-screen bg-slate-50 relative pb-24">
+  <main id="view" class="p-4"></main>
+  <nav id="nav" class="fixed bottom-0 inset-x-0 max-w-md mx-auto bg-white border-t border-slate-200 grid grid-cols-4 pb-[env(safe-area-inset-bottom)]"></nav>
+</div>
+<div id="modal"></div>
+<div id="print-area"></div>
+
+<script>
+/* ============================================================
+   CONFIG
+   ============================================================ */
+const APP_NAME = 'Artisio';
+// PAIEMENT STRIPE SANS BACKEND : collez ici vos liens de paiement (Stripe Dashboard > Liens de paiement).
+// Créez un lien par offre, prix récurrent mensuel, quantité ajustable, essai de 14 jours,
+// et redirection après paiement vers : https://VOTRE-DOMAINE/?checkout=success
+const PAYMENT_LINKS = { standard: '', pro: '' };   // ex : 'https://buy.stripe.com/xxxxxxxx'
+// Alternative avec serveur (server.js) : adresse du backend, vide = même domaine.
+const API_BASE = '';
+const TRIAL_DAYS = 14;
+const PLANS = {
+  standard: { name: 'Standard', price: 30, features: ['Devis & factures illimités', 'Clients illimités', 'PDF / impression'] },
+  pro:      { name: 'Pro',      price: 50, features: ['Tout le plan Standard', 'Plusieurs techniciens', 'Support prioritaire'] }
+};
+const TVA_RATES = [20, 10, 5.5, 0];
+const UNITS = ['u', 'h', 'm', 'm²', 'ml', 'forfait'];
+const TRADES = ['Plomberie', 'Plomberie – chauffage', 'Électricité', 'Maçonnerie', 'Peinture', 'Menuiserie', 'Couverture', 'Carrelage', 'Autre'];
+const STATUS = {
+  brouillon: ['Brouillon', 'bg-slate-200 text-slate-700'],
+  envoye:    ['Envoyé', 'bg-blue-100 text-blue-700'],
+  accepte:   ['Accepté', 'bg-emerald-100 text-emerald-700'],
+  refuse:    ['Refusé', 'bg-rose-100 text-rose-700'],
+  payee:     ['Payée', 'bg-emerald-100 text-emerald-700']
+};
+
+/* ============================================================
+   ÉTAT + STOCKAGE (localStorage ; remplacez par Firebase/Supabase pour le multi-appareils)
+   ============================================================ */
+const KEY = 'artisio_v1';
+const fresh = () => ({
+  company: { commercialName: '', legalName: '', trade: 'Plomberie', siret: '', phone: '', address: '', email: '', vatRegime: 'tva' },
+  clients: [], docs: [],
+  counters: {},
+  sub: { trialStart: Date.now(), status: 'trial', plan: null }
+});
+let S;
+try { S = JSON.parse(localStorage.getItem(KEY)) || fresh(); } catch { S = fresh(); }
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} };
+
+/* ============================================================
+   UTILITAIRES
+   ============================================================ */
+const $ = s => document.querySelector(s);
+const eur = n => new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(n || 0);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+const uid = () => Math.random().toString(36).slice(2, 9);
+const today = () => new Date().toISOString().slice(0, 10);
+const fdate = d => d ? new Date(d).toLocaleDateString('fr-FR') : '';
+const num = v => parseFloat(String(v).replace(',', '.')) || 0;
+const clientOf = id => S.clients.find(c => c.id === id);
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
+
+function totals(doc) {
+  const franchise = S.company.vatRegime === 'franchise';
+  let ht = 0; const byRate = {};
+  (doc.lines || []).forEach(l => {
+    const t = num(l.qty) * num(l.pu);
+    ht += t;
+    const r = franchise ? 0 : num(l.tva);
+    byRate[r] = (byRate[r] || 0) + t * r / 100;
+  });
+  const tva = Object.values(byRate).reduce((a, b) => a + b, 0);
+  return { ht, tva, ttc: ht + tva, byRate };
+}
+function nextNumber(type) {
+  const y = new Date().getFullYear(), k = type + y;
+  S.counters[k] = (S.counters[k] || 0) + 1;
+  return (type === 'devis' ? 'DV-' : 'FA-') + y + '-' + String(S.counters[k]).padStart(3, '0');
+}
+const trialLeft = () => Math.max(0, TRIAL_DAYS - Math.floor((Date.now() - S.sub.trialStart) / 864e5));
+const isLocked = () => S.sub.status === 'trial' && trialLeft() === 0;
+const companyReady = () => S.company.legalName && /^\d{14}$/.test(S.company.siret.replace(/\s/g, ''));
+const toEncaisser = () => S.docs
+  .filter(d => (d.type === 'facture' && d.status === 'envoye') || (d.type === 'devis' && d.status === 'accepte' && !d.invoiced))
+  .reduce((a, d) => a + totals(d).ttc, 0);
+
+/* ============================================================
+   NAVIGATION
+   ============================================================ */
+let tab = 'home', docFilter = 'all';
+const TABS = [
+  ['home', 'Accueil', 'M3 12l9-9 9 9M5 10v10h5v-6h4v6h5V10'],
+  ['docs', 'Documents', 'M7 3h7l5 5v13H7zM14 3v5h5M10 13h6M10 17h6'],
+  ['clients', 'Clients', 'M16 11a4 4 0 10-8 0 4 4 0 008 0zM4 21c0-4 4-6 8-6s8 2 8 6'],
+  ['company', 'Mon entreprise', 'M4 21V7l8-4 8 4v14M9 21v-6h6v6M9 10h.01M15 10h.01']
+];
+function renderNav() {
+  $('#nav').innerHTML = TABS.map(([k, label, path]) => `
+    <button data-act="tab" data-id="${k}" class="flex flex-col items-center py-2 text-[11px] ${tab === k ? 'text-teal-700 font-semibold' : 'text-slate-500'}">
+      <svg class="w-6 h-6 mb-0.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="${path}"/></svg>${label}
+    </button>`).join('');
+}
+function render() {
+  renderNav();
+  $('#view').innerHTML = { home: vHome, docs: vDocs, clients: vClients, company: vCompany }[tab]();
+  window.scrollTo(0, 0);
+}
+
+/* ============================================================
+   VUE : ACCUEIL
+   ============================================================ */
+function nextStep() {
+  const drafts = S.docs.filter(d => d.status === 'brouillon');
+  const accepted = S.docs.find(d => d.type === 'devis' && d.status === 'accepte' && !d.invoiced);
+  const unpaid = S.docs.filter(d => d.type === 'facture' && d.status === 'envoye');
+  if (!companyReady()) return { t: 'Complétez votre entreprise', d: 'Nom, SIRET et téléphone apparaîtront sur vos devis et factures.', b: 'Mon entreprise', a: 'tab', id: 'company' };
+  if (!S.docs.length) return { t: 'Créez un document', d: 'Faites votre premier devis ou votre première facture en 2 minutes.', b: 'Créer un document', a: 'new-doc' };
+  if (accepted) return { t: 'Transformez le devis en facture', d: `Le devis ${accepted.number} a été accepté.`, b: 'Facturer', a: 'convert', id: accepted.id };
+  if (drafts.length) return { t: 'Terminez votre brouillon', d: `${drafts.length} document(s) en brouillon à envoyer.`, b: 'Voir les documents', a: 'tab', id: 'docs' };
+  if (unpaid.length) return { t: 'Relancez vos factures', d: `${unpaid.length} facture(s) en attente de paiement.`, b: 'Voir les factures', a: 'tab', id: 'docs' };
+  return { t: 'Préparer mon site', d: 'Suivez la checklist pour bien démarrer.', b: 'Ouvrir la checklist', a: 'checklist' };
+}
+function vHome() {
+  const n = nextStep(), name = S.company.commercialName || 'artisan';
+  const banner = S.sub.status === 'active'
+    ? `<div class="bg-emerald-50 text-emerald-800 text-sm rounded-xl p-3 mb-4">Abonnement ${PLANS[S.sub.plan]?.name || ''} actif ✔</div>`
+    : `<button data-act="subscribe" class="w-full text-left bg-amber-50 border border-amber-200 text-amber-900 text-sm rounded-xl p-3 mb-4">
+         ${trialLeft() > 0 ? `<b>Essai gratuit : ${trialLeft()} jour(s) restant(s).</b> Sans carte bancaire.` : `<b>Votre essai est terminé.</b> Abonnez-vous pour continuer.`}
+         <span class="underline ml-1">Voir les offres</span></button>`;
+  return `
+    <div class="flex items-center gap-2 mb-3"><span class="w-8 h-8 rounded-lg bg-teal-700 flex items-center justify-center"><svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M5 20V9l7-5 7 5v11M9.5 20v-6h5v6"/></svg></span><span class="font-bold text-teal-800 tracking-tight">${APP_NAME}</span></div>
+    <h1 class="text-2xl font-bold mb-1">Bonjour, ${esc(name)}</h1>
+    <p class="text-slate-500 text-sm mb-4">Voici où en est votre activité.</p>
+    ${banner}
+    <div class="bg-teal-700 text-white rounded-2xl p-5 mb-4 shadow">
+      <div class="text-xs uppercase tracking-wide opacity-80">Prochaine étape</div>
+      <div class="text-lg font-semibold mt-1">${esc(n.t)}</div>
+      <p class="text-sm opacity-90 mt-1 mb-4">${esc(n.d)}</p>
+      <button data-act="${n.a}" data-id="${n.id || ''}" class="bg-white text-teal-800 btn text-sm">${esc(n.b)}</button>
+    </div>
+    <div class="bg-white rounded-2xl p-5 mb-4 shadow-sm border border-slate-100">
+      <div class="text-xs uppercase tracking-wide text-slate-500">À encaisser</div>
+      <div class="text-3xl font-bold mt-1">${eur(toEncaisser())}</div>
+      <p class="text-xs text-slate-400 mt-1">Factures envoyées non payées + devis acceptés non facturés (TTC).</p>
+    </div>
+    <div class="grid grid-cols-2 gap-3">
+      <button data-act="new-doc" class="btn btn-p">+ Créer un document</button>
+      <button data-act="checklist" class="btn btn-s">Préparer mon site</button>
+    </div>`;
+}
+
+/* ============================================================
+   VUE : DOCUMENTS
+   ============================================================ */
+function vDocs() {
+  const list = S.docs.filter(d => docFilter === 'all' || d.type === docFilter).sort((a, b) => b.date.localeCompare(a.date) || b.number.localeCompare(a.number));
+  const chip = (k, l) => `<button data-act="filter" data-id="${k}" class="px-3 py-1.5 rounded-full text-sm ${docFilter === k ? 'bg-teal-700 text-white' : 'bg-white border border-slate-200'}">${l}</button>`;
+  return `
+    <div class="flex items-center justify-between mb-3"><h1 class="text-2xl font-bold">Documents</h1>
+      <button data-act="new-doc" class="btn btn-p !py-2 text-sm">+ Nouveau</button></div>
+    <div class="flex gap-2 mb-4">${chip('all', 'Tous')}${chip('devis', 'Devis')}${chip('facture', 'Factures')}</div>
+    ${list.length ? list.map(d => {
+      const c = clientOf(d.clientId), st = STATUS[d.status];
+      return `<button data-act="view-doc" data-id="${d.id}" class="w-full text-left bg-white rounded-xl p-4 mb-2 border border-slate-100 shadow-sm flex justify-between items-center">
+        <div><div class="font-semibold">${esc(d.number)} <span class="text-xs text-slate-400 font-normal">${d.type === 'devis' ? 'Devis' : 'Facture'}</span></div>
+        <div class="text-sm text-slate-500">${esc(c?.name || 'Client non défini')} · ${fdate(d.date)}</div></div>
+        <div class="text-right"><div class="font-semibold">${eur(totals(d).ttc)}</div><span class="text-[11px] px-2 py-0.5 rounded-full ${st[1]}">${st[0]}</span></div></button>`;
+    }).join('') : `<div class="text-center text-slate-400 py-12">Aucun document pour le moment.</div>`}`;
+}
+
+/* ============================================================
+   VUE : CLIENTS
+   ============================================================ */
+function vClients() {
+  return `
+    <div class="flex items-center justify-between mb-4"><h1 class="text-2xl font-bold">Clients</h1>
+      <button data-act="new-client" class="btn btn-p !py-2 text-sm">+ Nouveau</button></div>
+    ${S.clients.length ? S.clients.map(c => `
+      <button data-act="edit-client" data-id="${c.id}" class="w-full text-left bg-white rounded-xl p-4 mb-2 border border-slate-100 shadow-sm">
+        <div class="font-semibold">${esc(c.name)}</div>
+        <div class="text-sm text-slate-500">${esc([c.phone, c.email].filter(Boolean).join(' · ')) || '—'}</div>
+        <div class="text-xs text-slate-400">${esc(c.address)}</div></button>`).join('')
+      : `<div class="text-center text-slate-400 py-12">Ajoutez votre premier client.</div>`}`;
+}
+function clientForm(id) {
+  const c = id ? clientOf(id) : { name: '', phone: '', email: '', address: '' };
+  openModal(`
+    <h2 class="text-xl font-bold mb-4">${id ? 'Modifier' : 'Nouveau'} client</h2>
+    <div class="space-y-3">
+      <div><label class="lbl">Nom / Société</label><input id="c_name" class="inp" value="${esc(c.name)}"></div>
+      <div><label class="lbl">Téléphone</label><input id="c_phone" type="tel" class="inp" value="${esc(c.phone)}"></div>
+      <div><label class="lbl">E-mail</label><input id="c_email" type="email" class="inp" value="${esc(c.email)}"></div>
+      <div><label class="lbl">Adresse (chantier / facturation)</label><textarea id="c_address" rows="2" class="inp">${esc(c.address)}</textarea></div>
+    </div>
+    <div class="grid grid-cols-2 gap-3 mt-5"><button data-act="close" class="btn btn-s">Annuler</button><button data-act="save-client" data-id="${id || ''}" class="btn btn-p">Enregistrer</button></div>
+    ${id ? `<button data-act="del-client" data-id="${id}" class="btn btn-d w-full mt-3">Supprimer</button>` : ''}`);
+}
+
+/* ============================================================
+   VUE : MON ENTREPRISE
+   ============================================================ */
+function vCompany() {
+  const c = S.company, f = (id, label, v, type = 'text', ph = '') =>
+    `<div><label class="lbl">${label}</label><input id="${id}" type="${type}" class="inp" value="${esc(v)}" placeholder="${ph}"></div>`;
+  return `
+    <h1 class="text-2xl font-bold mb-1">Mon entreprise</h1>
+    <p class="text-slate-500 text-sm mb-4">Ces informations sont reprises automatiquement sur vos devis et factures.</p>
+    <div class="space-y-3">
+      ${f('e_commercial', 'Nom commercial', c.commercialName, 'text', 'Ma nouvelle entreprise')}
+      ${f('e_legal', 'Raison sociale / Nom affiché', c.legalName, 'text', 'Martin Julien EI')}
+      <div><label class="lbl">Métier principal</label><select id="e_trade" class="inp">${TRADES.map(t => `<option ${t === c.trade ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+      ${f('e_siret', 'SIRET (14 chiffres)', c.siret, 'text', '123 456 789 00012')}
+      ${f('e_phone', 'Téléphone professionnel', c.phone, 'tel')}
+      ${f('e_email', 'E-mail professionnel', c.email, 'email')}
+      <div><label class="lbl">Adresse</label><textarea id="e_address" rows="2" class="inp">${esc(c.address)}</textarea></div>
+      <div><label class="lbl">Régime de TVA</label><select id="e_vat" class="inp">
+        <option value="tva" ${c.vatRegime === 'tva' ? 'selected' : ''}>Assujetti à la TVA</option>
+        <option value="franchise" ${c.vatRegime === 'franchise' ? 'selected' : ''}>Franchise en base (auto-entrepreneur)</option></select></div>
+    </div>
+    <button data-act="save-company" class="btn btn-p w-full mt-5">Enregistrer</button>
+    <button data-act="subscribe" class="btn btn-s w-full mt-3">Mon abonnement</button>
+    <div class="grid grid-cols-2 gap-3 mt-6">
+      <button data-act="export-data" class="btn btn-s text-sm">Sauvegarder mes données</button>
+      <button data-act="import-data" class="btn btn-s text-sm">Restaurer une sauvegarde</button>
+    </div>
+    <input id="import_file" type="file" accept="application/json" class="hidden">
+    <p class="text-[11px] text-slate-400 mt-4 text-center">${APP_NAME} · Les données sont stockées sur cet appareil : pensez à sauvegarder régulièrement.</p>`;
+}
+
+/* ============================================================
+   ÉDITEUR DE DOCUMENT
+   ============================================================ */
+let draft = null;
+const newLine = () => ({ id: uid(), desc: '', qty: 1, unit: 'u', pu: 0, tva: S.company.vatRegime === 'franchise' ? 0 : 10 });
+
+function openEditor(id, type) {
+  if (isLocked()) return subscribeSheet(true);
+  draft = id ? structuredClone(S.docs.find(d => d.id === id))
+             : { id: uid(), type: type || 'devis', number: null, clientId: S.clients[0]?.id || '', date: today(), lines: [newLine()], notes: '', status: 'brouillon' };
+  renderEditor();
+}
+function renderEditor() {
+  const d = draft;
+  openModal(`
+    <div class="flex items-center justify-between mb-4"><h2 class="text-xl font-bold">${d.number ? esc(d.number) : (d.type === 'devis' ? 'Nouveau devis' : 'Nouvelle facture')}</h2>
+      <button data-act="close" class="text-slate-400 text-2xl leading-none">×</button></div>
+    <div class="grid grid-cols-2 gap-3 mb-3">
+      <div><label class="lbl">Type</label><select class="inp" data-f="type" ${d.number ? 'disabled' : ''}><option value="devis" ${d.type === 'devis' ? 'selected' : ''}>Devis</option><option value="facture" ${d.type === 'facture' ? 'selected' : ''}>Facture</option></select></div>
+      <div><label class="lbl">Date</label><input type="date" class="inp" data-f="date" value="${d.date}"></div>
+    </div>
+    <label class="lbl">Client</label>
+    <div class="flex gap-2 mb-4"><select class="inp" data-f="clientId"><option value="">— Choisir —</option>${S.clients.map(c => `<option value="${c.id}" ${c.id === d.clientId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <button data-act="quick-client" class="btn btn-s !px-4">+</button></div>
+    <div class="text-sm font-semibold mb-2">Lignes</div>
+    ${d.lines.map((l, i) => `
+      <div class="bg-white border border-slate-200 rounded-xl p-3 mb-2">
+        <textarea rows="2" class="inp mb-2" data-l="desc" data-i="${i}" placeholder="Description (ex : Remplacement chauffe-eau 200 L)">${esc(l.desc)}</textarea>
+        <div class="grid grid-cols-4 gap-2">
+          <div><label class="lbl">Qté</label><input inputmode="decimal" class="inp !px-2" data-l="qty" data-i="${i}" value="${l.qty}"></div>
+          <div><label class="lbl">Unité</label><select class="inp !px-1" data-l="unit" data-i="${i}">${UNITS.map(u => `<option ${u === l.unit ? 'selected' : ''}>${u}</option>`).join('')}</select></div>
+          <div><label class="lbl">PU HT</label><input inputmode="decimal" class="inp !px-2" data-l="pu" data-i="${i}" value="${l.pu}"></div>
+          <div><label class="lbl">TVA</label><select class="inp !px-1" data-l="tva" data-i="${i}" ${S.company.vatRegime === 'franchise' ? 'disabled' : ''}>${TVA_RATES.map(r => `<option value="${r}" ${r == l.tva ? 'selected' : ''}>${r}%</option>`).join('')}</select></div>
+        </div>
+        <div class="flex justify-between items-center mt-2 text-sm"><button data-act="del-line" data-id="${i}" class="text-rose-600">Supprimer</button><span class="font-semibold" id="lt_${i}">${eur(num(l.qty) * num(l.pu))}</span></div>
+      </div>`).join('')}
+    <button data-act="add-line" class="btn btn-s w-full mb-4">+ Ajouter une ligne</button>
+    <label class="lbl">Notes (délais, conditions…)</label>
+    <textarea rows="2" class="inp mb-4" data-f="notes">${esc(d.notes)}</textarea>
+    <div class="bg-slate-100 rounded-xl p-3 text-sm mb-4" id="tot"></div>
+    <button data-act="save-doc" class="btn btn-p w-full">Enregistrer</button>`);
+  refreshTotals();
+}
+function refreshTotals() {
+  const t = totals(draft), el = $('#tot'); if (!el) return;
+  el.innerHTML = `<div class="flex justify-between"><span>Total HT</span><b>${eur(t.ht)}</b></div>
+    <div class="flex justify-between"><span>TVA</span><b>${eur(t.tva)}</b></div>
+    <div class="flex justify-between text-base mt-1"><span>Total TTC</span><b>${eur(t.ttc)}</b></div>`;
+  draft.lines.forEach((l, i) => { const e = $('#lt_' + i); if (e) e.textContent = eur(num(l.qty) * num(l.pu)); });
+}
+
+/* ============================================================
+   APERÇU / IMPRESSION DU DOCUMENT
+   ============================================================ */
+function sheet(d) {
+  const c = S.company, cl = clientOf(d.clientId) || {}, t = totals(d), franchise = c.vatRegime === 'franchise';
+  const due = addDays(d.date, d.type === 'devis' ? 30 : 30);
+  return `
+  <div class="sheet bg-white text-slate-900 text-[13px] p-5 rounded-xl border border-slate-200 shadow-sm" style="font-family:system-ui,sans-serif">
+    <div class="flex justify-between gap-4">
+      <div><div class="text-base font-bold">${esc(c.legalName || c.commercialName || 'Votre entreprise')}</div>
+        ${c.commercialName && c.legalName ? `<div>${esc(c.commercialName)}</div>` : ''}
+        <div>${esc(c.trade)}</div><div style="white-space:pre-line">${esc(c.address)}</div>
+        <div>${esc(c.phone)} ${esc(c.email)}</div><div>SIRET : ${esc(c.siret)}</div></div>
+      <div class="text-right"><div class="text-lg font-bold uppercase">${d.type === 'devis' ? 'Devis' : 'Facture'}</div>
+        <div>N° ${esc(d.number || 'brouillon')}</div><div>Date : ${fdate(d.date)}</div>
+        <div>${d.type === 'devis' ? 'Valable jusqu\'au' : 'Échéance'} : ${fdate(due)}</div></div>
+    </div>
+    <div class="mt-4 p-3 bg-slate-50 rounded-lg"><div class="text-[11px] uppercase text-slate-500">Client</div>
+      <b>${esc(cl.name || '—')}</b><div style="white-space:pre-line">${esc(cl.address || '')}</div><div>${esc(cl.phone || '')} ${esc(cl.email || '')}</div></div>
+    <table class="w-full mt-4" style="border-collapse:collapse">
+      <thead><tr style="border-bottom:2px solid #0f766e;text-align:left"><th class="py-1">Description</th><th>Qté</th><th class="text-right">PU HT</th><th class="text-right">TVA</th><th class="text-right">Total HT</th></tr></thead>
+      <tbody>${d.lines.map(l => `<tr style="border-bottom:1px solid #e2e8f0"><td class="py-1.5" style="white-space:pre-line">${esc(l.desc)}</td><td>${esc(l.qty)} ${esc(l.unit)}</td><td class="text-right">${eur(num(l.pu))}</td><td class="text-right">${franchise ? '—' : num(l.tva) + '%'}</td><td class="text-right">${eur(num(l.qty) * num(l.pu))}</td></tr>`).join('')}</tbody>
+    </table>
+    <div class="mt-3 ml-auto w-56">
+      <div class="flex justify-between"><span>Total HT</span><span>${eur(t.ht)}</span></div>
+      ${franchise ? '' : Object.entries(t.byRate).filter(([r]) => +r > 0).map(([r, v]) => `<div class="flex justify-between"><span>TVA ${r}%</span><span>${eur(v)}</span></div>`).join('')}
+      <div class="flex justify-between font-bold text-base border-t mt-1 pt-1"><span>Total TTC</span><span>${eur(t.ttc)}</span></div>
+    </div>
+    ${d.notes ? `<div class="mt-3" style="white-space:pre-line"><b>Notes :</b> ${esc(d.notes)}</div>` : ''}
+    <div class="mt-4 text-[11px] text-slate-500 space-y-1">
+      ${franchise ? '<div>TVA non applicable, art. 293 B du CGI.</div>' : ''}
+      ${d.type === 'devis'
+        ? '<div>Devis reçu avant l\'exécution des travaux. Durée de validité : 30 jours.</div><div class="mt-6 text-slate-700">Date et signature du client, précédées de la mention « Bon pour accord » :</div><div style="height:50px"></div>'
+        : '<div>Paiement à 30 jours. En cas de retard : pénalités de 3 fois le taux d\'intérêt légal et indemnité forfaitaire de recouvrement de 40 €. Pas d\'escompte pour paiement anticipé.</div>'}
+    </div>
+  </div>`;
+}
+function viewDoc(id) {
+  const d = S.docs.find(x => x.id === id); if (!d) return;
+  const nextBtns = d.type === 'devis'
+    ? { brouillon: [['envoye', 'Marquer envoyé']], envoye: [['accepte', 'Accepté'], ['refuse', 'Refusé']], accepte: [], refuse: [] }
+    : { brouillon: [['envoye', 'Marquer envoyée']], envoye: [['payee', 'Marquer payée']], payee: [] };
+  openModal(`
+    <div class="flex items-center justify-between mb-3"><span class="text-[11px] px-2 py-1 rounded-full ${STATUS[d.status][1]}">${STATUS[d.status][0]}</span>
+      <button data-act="close" class="text-slate-400 text-2xl leading-none">×</button></div>
+    ${sheet(d)}
+    <div class="grid grid-cols-2 gap-2 mt-4">
+      ${(nextBtns[d.status] || []).map(([s, l]) => `<button data-act="set-status" data-id="${d.id}" data-v="${s}" class="btn btn-p">${l}</button>`).join('')}
+      ${d.type === 'devis' && d.status === 'accepte' && !d.invoiced ? `<button data-act="convert" data-id="${d.id}" class="btn btn-p">Créer la facture</button>` : ''}
+      <button data-act="print" data-id="${d.id}" class="btn btn-s">PDF / Imprimer</button>
+      <button data-act="edit-doc" data-id="${d.id}" class="btn btn-s">Modifier</button>
+      <button data-act="del-doc" data-id="${d.id}" class="btn btn-d">Supprimer</button>
+    </div>`);
+}
+
+/* ============================================================
+   ABONNEMENT (Stripe via backend)
+   ============================================================ */
+let seats = 1;
+function subscribeSheet(locked) {
+  openModal(`
+    <div class="flex items-center justify-between mb-2"><h2 class="text-xl font-bold">Abonnement</h2><button data-act="close" class="text-slate-400 text-2xl leading-none">×</button></div>
+    <p class="text-sm text-slate-600 mb-4">${S.sub.status === 'active' ? 'Votre abonnement est actif.' : locked ? 'Votre essai gratuit est terminé. Choisissez une offre pour continuer à créer des documents.' : `Essai gratuit de ${TRIAL_DAYS} jours, sans carte bancaire (${trialLeft()} jour(s) restant(s)).`}</p>
+    <label class="lbl">Nombre d'utilisateurs / techniciens</label>
+    <input id="seats" type="number" min="1" value="${seats}" class="inp mb-4">
+    ${Object.entries(PLANS).map(([k, p]) => `
+      <div class="border border-slate-200 rounded-xl p-4 mb-3 bg-white">
+        <div class="flex justify-between items-baseline"><b>${p.name}</b><span><b class="text-xl">${p.price} €</b> <span class="text-xs text-slate-500">/ utilisateur / mois</span></span></div>
+        <ul class="text-sm text-slate-600 my-2 list-disc ml-5">${p.features.map(f => `<li>${f}</li>`).join('')}</ul>
+        <button data-act="checkout" data-id="${k}" class="btn btn-p w-full">${S.sub.status === 'trial' && trialLeft() > 0 ? 'Démarrer l\'essai gratuit' : 'S\'abonner'}</button>
+      </div>`).join('')}
+    <div id="sub_msg" class="text-sm text-rose-600"></div>`);
+}
+async function checkout(plan) {
+  seats = Math.max(1, parseInt($('#seats')?.value) || 1);
+  const msg = $('#sub_msg'); msg.textContent = 'Redirection vers le paiement sécurisé…'; msg.className = 'text-sm text-slate-500';
+  if (PAYMENT_LINKS[plan]) {
+    const u = new URL(PAYMENT_LINKS[plan]);
+    if (S.company.email) u.searchParams.set('prefilled_email', S.company.email);
+    u.searchParams.set('client_reference_id', S.id || (S.id = uid() + uid()));
+    S.sub.plan = plan; save();
+    location.href = u.toString(); return;
+  }
+  try {
+    const r = await fetch(API_BASE + '/api/create-checkout-session', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan, seats, email: S.company.email || undefined })
+    });
+    const data = await r.json();
+    if (!r.ok || !data.url) throw new Error(data.error || 'Erreur serveur');
+    S.sub.plan = plan; save();
+    location.href = data.url;
+  } catch (e) {
+    msg.className = 'text-sm text-rose-600';
+    msg.textContent = 'Paiement indisponible : renseignez vos liens Stripe dans PAYMENT_LINKS (en haut du script) ou déployez server.js.';
+  }
+}
+async function handleCheckoutReturn() {
+  const p = new URLSearchParams(location.search), sid = p.get('session_id');
+  if (p.get('checkout') !== 'success') return;
+  history.replaceState({}, '', location.pathname);
+  if (!sid) { S.sub.status = 'active'; save(); render(); return; }   // mode Payment Link (sans serveur)
+  try {
+    const r = await fetch(API_BASE + '/api/subscription-status?session_id=' + encodeURIComponent(sid));
+    const d = await r.json();
+    if (['active', 'trialing'].includes(d.status)) { S.sub.status = 'active'; save(); render(); }
+  } catch {}
+}
+
+/* ============================================================
+   MODAL
+   ============================================================ */
+function openModal(html) {
+  $('#modal').innerHTML = `<div class="fixed inset-0 bg-black/40 z-50 flex justify-center" data-act="backdrop">
+    <div class="bg-slate-50 w-full max-w-md h-full overflow-y-auto p-4 pb-10" onclick="event.stopPropagation()">${html}</div></div>`;
+}
+const closeModal = () => { $('#modal').innerHTML = ''; draft = null; };
+
+function checklist() {
+  const items = [
+    ['Renseigner mon entreprise (nom, SIRET, téléphone)', companyReady()],
+    ['Ajouter mon premier client', S.clients.length > 0],
+    ['Créer mon premier devis', S.docs.some(d => d.type === 'devis')],
+    ['Envoyer un document', S.docs.some(d => d.status !== 'brouillon')],
+    ['Activer mon abonnement', S.sub.status === 'active']
+  ];
+  openModal(`<div class="flex items-center justify-between mb-4"><h2 class="text-xl font-bold">Préparer mon site</h2><button data-act="close" class="text-slate-400 text-2xl leading-none">×</button></div>
+    ${items.map(([l, ok]) => `<div class="flex items-center gap-3 bg-white rounded-xl p-3 mb-2 border border-slate-100"><span class="w-6 h-6 rounded-full flex items-center justify-center text-white text-sm ${ok ? 'bg-emerald-500' : 'bg-slate-300'}">${ok ? '✓' : ''}</span><span class="${ok ? 'line-through text-slate-400' : ''}">${l}</span></div>`).join('')}
+    <p class="text-xs text-slate-400 mt-3">Étape suivante possible : une page web publique pour votre activité (à développer).</p>`);
+}
+
+/* ============================================================
+   ACTIONS
+   ============================================================ */
+function act(a, id, v) {
+  switch (a) {
+    case 'tab': closeModal(); tab = id; render(); break;
+    case 'filter': docFilter = id; render(); break;
+    case 'close': case 'backdrop': closeModal(); break;
+    case 'checklist': checklist(); break;
+    case 'subscribe': subscribeSheet(false); break;
+    case 'checkout': checkout(id); break;
+
+    case 'new-doc': openEditor(null, tab === 'docs' && docFilter === 'facture' ? 'facture' : 'devis'); break;
+    case 'edit-doc': openEditor(id); break;
+    case 'view-doc': viewDoc(id); break;
+    case 'add-line': draft.lines.push(newLine()); renderEditor(); break;
+    case 'del-line': if (draft.lines.length > 1) { draft.lines.splice(+id, 1); renderEditor(); } break;
+    case 'quick-client': clientForm(); window._returnToEditor = true; break;
+    case 'save-doc': {
+      if (!draft.clientId) return alert('Choisissez un client.');
+      if (!draft.lines.some(l => l.desc.trim())) return alert('Ajoutez au moins une ligne avec une description.');
+      const i = S.docs.findIndex(d => d.id === draft.id);
+      if (!draft.number) draft.number = nextNumber(draft.type);
+      if (i >= 0) S.docs[i] = draft; else S.docs.push(draft);
+      save(); const sid = draft.id; closeModal(); render(); viewDoc(sid); break;
+    }
+    case 'set-status': { const d = S.docs.find(x => x.id === id); d.status = v; save(); render(); viewDoc(id); break; }
+    case 'convert': {
+      const q = S.docs.find(x => x.id === id);
+      const f = { ...structuredClone(q), id: uid(), type: 'facture', number: nextNumber('facture'), date: today(), status: 'brouillon', fromQuote: q.number, invoiced: false };
+      q.invoiced = true; S.docs.push(f); save(); closeModal(); tab = 'docs'; render(); viewDoc(f.id); break;
+    }
+    case 'del-doc': if (confirm('Supprimer ce document ?')) { S.docs = S.docs.filter(d => d.id !== id); save(); closeModal(); render(); } break;
+    case 'print': {
+      const d = S.docs.find(x => x.id === id);
+      $('#print-area').innerHTML = sheet(d);
+      const old = document.title; document.title = d.number;
+      window.print(); document.title = old; break;
+    }
+
+    case 'new-client': clientForm(); break;
+    case 'edit-client': clientForm(id); break;
+    case 'save-client': {
+      const c = { id: id || uid(), name: $('#c_name').value.trim(), phone: $('#c_phone').value.trim(), email: $('#c_email').value.trim(), address: $('#c_address').value.trim() };
+      if (!c.name) return alert('Le nom est obligatoire.');
+      const i = S.clients.findIndex(x => x.id === c.id);
+      if (i >= 0) S.clients[i] = c; else S.clients.push(c);
+      save();
+      if (window._returnToEditor && draft) { draft.clientId = c.id; window._returnToEditor = false; renderEditor(); }
+      else { closeModal(); render(); }
+      break;
+    }
+    case 'del-client':
+      if (S.docs.some(d => d.clientId === id)) return alert('Ce client a des documents associés.');
+      if (confirm('Supprimer ce client ?')) { S.clients = S.clients.filter(c => c.id !== id); save(); closeModal(); render(); } break;
+
+    case 'export-data': {
+      const blob = new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'artisio-sauvegarde-' + today() + '.json'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); break;
+    }
+    case 'import-data': $('#import_file').click(); break;
+    case 'save-company': {
+      const siret = $('#e_siret').value.replace(/\s/g, '');
+      if (siret && !/^\d{14}$/.test(siret)) return alert('Le SIRET doit comporter 14 chiffres.');
+      S.company = { commercialName: $('#e_commercial').value.trim(), legalName: $('#e_legal').value.trim(), trade: $('#e_trade').value, siret,
+        phone: $('#e_phone').value.trim(), email: $('#e_email').value.trim(), address: $('#e_address').value.trim(), vatRegime: $('#e_vat').value };
+      save(); alert('Informations enregistrées ✔'); break;
+    }
+  }
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  if (b.dataset.act === 'backdrop' && e.target !== b) return;
+  act(b.dataset.act, b.dataset.id, b.dataset.v);
+});
+// Saisie dans l'éditeur (sans re-render pour garder le focus)
+const onField = e => {
+  const t = e.target; if (!draft) return;
+  if (t.dataset.f) { draft[t.dataset.f] = t.value; if (t.dataset.f === 'type') renderEditor(); }
+  else if (t.dataset.l) { draft.lines[+t.dataset.i][t.dataset.l] = t.value; refreshTotals(); }
+};
+document.addEventListener('change', e => {
+  if (e.target.id !== 'import_file' || !e.target.files[0]) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const d = JSON.parse(r.result);
+      if (!d.company || !Array.isArray(d.clients) || !Array.isArray(d.docs)) throw 0;
+      if (!confirm('Remplacer les données actuelles par cette sauvegarde ?')) return;
+      S = { ...fresh(), ...d }; save(); render(); alert('Sauvegarde restaurée ✔');
+    } catch { alert('Fichier de sauvegarde invalide.'); }
+  };
+  r.readAsText(e.target.files[0]);
+});
+document.addEventListener('input', onField);
+document.addEventListener('change', onField);
+
+/* ============================================================
+   DÉMARRAGE
+   ============================================================ */
+render();
+handleCheckoutReturn();
+</script>
+</body>
+</html>
